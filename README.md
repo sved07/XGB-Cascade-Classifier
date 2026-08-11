@@ -1,87 +1,111 @@
-# XGBoost Cascade Classifier with IDK Cascades
+# IDK Cascade Meta-Router Study
 
-An empirical investigation and implementation of **Selective Deferred Prediction ("I Don't Know" / IDK Cascades)** using XGBoost models. This project demonstrates how multi-stage confidence routing significantly reduces inference latency and computational overhead while maintaining or improving baseline classification accuracy.
+## Overview
 
----
+This project studies **IDK (I-Don't-Know) cascades** — a technique for making inference cheaper by
+running a small, fast model first (Model A) and only escalating to a large, accurate model (Model C)
+when Model A signals low confidence. The escalation decision is made by a small **meta-router** classifier
+trained on Model A's own output telemetry (confidence, entropy, margin between top-2 class probabilities).
 
-## 📌 Abstract & Motivation
+The core question this project investigates: **does the choice of meta-router matter for the cascade's
+end-to-end latency, or is the router "free" compared to the cost of the underlying models?**
 
-Standard machine learning inference deploys high-capacity models uniformly across all test samples, regardless of instance difficulty. In real-time and compute-constrained environments, evaluating "easy" samples through large ensembles creates unnecessary latency and computational costs.
+## Setup
 
-This project introduces a **cascade architecture** that routes samples dynamically based on prediction uncertainty:
-* **High-confidence predictions** are resolved instantly in early, lightweight stages.
-* **Ambiguous/uncertain samples** fall into an **"I Don't Know" (IDK)** state and are escalated to deeper, high-capacity stages.
+- **Base cascade**: ResNet20 (Model A, fast/cheap) → ResNet56 (Model C, slow/accurate), pretrained on
+  CIFAR-10 and CIFAR-100 (`chenyaofo/pytorch-cifar-models`).
+- **Router features**: `confidence`, `entropy`, `margin` — all derived from Model A's softmax output on
+  each sample, no extra forward pass required.
+- **Router families compared**: XGBoost, Random Forest, Logistic Regression, and a single shallow
+  Decision Tree — all trained with the same cost-sensitive class weighting so no router is unfairly
+  tuned relative to the others.
+- **Evaluation**: 8 random seeds × 2 datasets (CIFAR-10, CIFAR-100), 4,000 samples per seed, holding a
+  fixed escalation threshold (`theta = 0.20`) and early-exit threshold (`0.90`) constant across all
+  router families for a fair comparison.
+- **Baselines**: "Pure Expert" (always run Model C, no cascade) and a "Naive Threshold" cascade
+  (escalate purely on a raw confidence cutoff, no learned router at all).
 
----
+## Key Finding: router overhead can erase the entire benefit of cascading
 
-### 1. Confidence-Based Decision Logic
-For a binary classification task with output probability $P(y = 1 | x)$, Stage $k$ accepts the prediction if:
+Early results only measured cascade latency as `LATENCY_A + LATENCY_C`, which **excluded the router's
+own inference cost** entirely. Once that overhead is correctly folded into the end-to-end latency:
 
-$$P(y = 1 | x) \le \tau_{\text{low}} \quad \text{OR} \quad P(y = 1 | x) \ge \tau_{\text{high}}$$
+| Metric | XGBoost | Random Forest |
+|---|---|---|
+| Router overhead alone | 0.465 ± 0.059 ms/sample | 3.258 ± 0.227 ms/sample |
+| End-to-end cascade latency | 4.635 ± 0.769 ms | 7.563 ± 0.866 ms |
+| Accuracy | 83.48 ± 10.76% | 83.59 ± 10.65% |
 
-If $\tau_{\text{low}} < P(y = 1 | x) < \tau_{\text{high}}$, the model outputs **IDK (Deferral)**, passing $x$ to Stage $k+1$.
+For reference, the "Pure Expert" baseline (always running Model C, no cascade at all) costs **6.831 ms**.
 
-### 2. Stage-Wise Training & Specialization
-* **Stage 1 (Filter):** Optimized for high precision on high-confidence predictions and low per-sample latency (small `max_depth`, few `n_estimators`).
-* **Stage 2 (Expert):** Trained either on the full dataset or specifically fine-tuned on samples deferred by Stage 1, using higher model capacity to resolve complex decision boundaries.
+**The Random Forest cascade (7.563 ms) ends up slower than never cascading at all.** Its own router
+overhead is large enough that the "cheap path" (Model A + router, before ever considering Model C) already
+costs nearly as much as the full expert model — so once you add the cost of the samples that *do* escalate,
+the total exceeds the no-cascade baseline. XGBoost's much smaller overhead (7x less) means its cheap path
+stays meaningfully below the expert model's cost, so the cascade's savings survive.
 
----
+Accuracy between XGBoost and Random Forest is statistically indistinguishable (paired t-test / Wilcoxon,
+not significant) — this is a **pure latency effect**, not an accuracy/latency tradeoff. The latency gap
+itself is highly significant: **p = 0.0078** (Wilcoxon signed-rank, the smallest achievable p-value at
+n=8 seeds) on both CIFAR-10 and CIFAR-100 — Random Forest was slower than XGBoost on every single seed,
+with zero exceptions.
 
-## 🧪 Experimental Workflow
+## Why the overhead gap exists
 
-The experimental pipeline implemented in the notebooks follows four systematic phases:
+Profiling `predict_proba` on both router types (same hyperparameters: `n_estimators=50, max_depth=3`)
+shows the gap is **not** primarily about tree-evaluation cost. XGBoost's booster evaluates all 50 trees in
+one compiled call. Random Forest's overhead is dominated by sklearn's ensemble dispatch machinery —
+`joblib.Parallel` call overhead plus a `check_is_fitted` / `warnings.filterwarnings` check run on *every
+individual tree, every single call*. This is an implementation-level inefficiency in scikit-learn's
+`RandomForestClassifier`, not an inherent property of Random Forest as an algorithm.
 
-1. **Feature Engineering & Preprocessing:** Data cleaning, normalization, and creation of validation splits tuned for cascade calibration.
-2. **Stage Calibration:** Training individual XGBoost stages across varying depths (`max_depth`: 3 to 10) and tree counts (`n_estimators`: 50 to 500).
-3. **Threshold Calibration ($\tau$ Sweep):** Grid-searching upper and lower confidence thresholds $(\tau_{\text{low}}, \tau_{\text{high}})$ to build Pareto-optimal curves between **Deferral Rate ($R_{\text{IDK}}$)** and **Accuracy**.
-4. **Latency & Cost Evaluation:** Measuring wall-clock inference time and calculating net compute savings relative to a single high-capacity baseline model.
+## Generalizing beyond XGBoost vs. Random Forest
 
----
+The notebook extends the comparison to a full **router family registry** (`ROUTER_REGISTRY`), so any new
+router type can be added by writing one `train_*_router` function and adding it to the dict — every
+downstream step (overhead timing, multi-seed trial, pairwise significance tests, Pareto plot) picks it up
+automatically. This run adds:
 
-## 📊 Key Evaluation Metrics
+- **Logistic Regression** — the simplest possible router, useful for checking whether router complexity
+  buys anything at all.
+- **Decision Tree** (single tree, no ensembling) — isolates whether *ensembling itself* (bagging or
+  boosting over many trees) is the source of overhead, independent of tree count.
 
-The cascade system is evaluated using the following formal metrics:
+*(Fill in this section with the actual Logistic Regression / Decision Tree numbers once you've run the
+updated notebook — the registry-based structure means the Summary Performance and Pareto sections will
+report them automatically alongside XGBoost and Random Forest.)*
 
-* **Overall Cascade Accuracy ($A_{\text{cascade}}$):** Combined accuracy across all resolved samples across all stages.
-* **Deferral Rate ($R_{\text{IDK}}$):** Proportion of samples passed from Stage 1 to Stage 2:
-  $$R_{\text{IDK}} = \frac{N_{\text{deferred}}}{N_{\text{total}}}$$
-* **Speedup Factor ($S$):** Ratio of baseline execution time to cascade execution time:
-  $$S = \frac{T_{\text{baseline}}}{\sum_{i=1}^{K} N_i \cdot t_i}$$
-  *Where $N_i$ is the number of samples processed at Stage $i$, and $t_i$ is the average per-sample latency of Stage $i$.*
+## Total Computation Time
 
----
+The notebook reports both:
+1. **Total pipeline wall-clock time** — the full time to train and evaluate every router family, across
+   all seeds and both datasets (Section 10 of the notebook).
+2. **Per-router-family cumulative compute time** — how much of that total each router family's
+   training+evaluation consumed, useful for distinguishing "cheap to run at inference time" (per-sample
+   latency) from "cheap to train and evaluate at experiment time" (total compute).
 
-## 📈 Results & Findings
+*(Fill in the actual numbers here after running — e.g. "Total pipeline wall-clock: X minutes; XGBoost:
+Y% of router compute time, Random Forest: Z%, ...")*
 
-* **Compute Reduction:** Successfully filtered **60–80%** of test samples in Stage 1 without sacrificing classification accuracy.
-* **Latency Optimization:** Achieved up to **2.5x–4x inference speedup** compared to running all samples through the heaviest standalone XGBoost baseline.
-* **Threshold Trade-off:** Expanding the IDK region $(\tau_{\text{low}}, \tau_{\text{high}})$ strictly increases overall cascade accuracy at the cost of higher average latency per sample.
+## Repository Structure
 
----
-## 🎯 Conclusion: Why the XGBoost-Based IDK Cascade Outperforms Alternatives
+- `idk_cascade_full_study.ipynb` — main notebook: dataset/model setup, router training, overhead
+  profiling, multi-seed evaluation across all router families, significance testing, Pareto plot, and
+  total compute time reporting.
 
-Deploying a single monolithic model forces an unavoidable trade-off between accuracy and inference speed. The **XGBoost IDK Cascade Classifier** resolves this trade-off by dynamically allocating compute based on instance difficulty while leveraging the unique strengths of gradient-boosted decision trees.
+## How to Run
 
----
+1. Open `idk_cascade_full_study.ipynb` in Colab (GPU runtime recommended — CIFAR-100 with ResNet56 across
+   8 seeds × 2 datasets × 4 router families is compute-heavy).
+2. `Runtime → Run all`. The notebook is ordered so every function is defined before it's used — if you
+   edit cell order, keep `measure_router_overhead_per_sample` (Section 4) before `evaluate_router_cascade`
+   (Section 5), which depends on it.
+3. Results land in `trial_df`; the Pareto plot saves to `router_family_pareto.png`.
 
-### Key Advantages & Empirical Breakthroughs
+## Status
 
-#### 1. Breaking the Latency-Accuracy Zero-Sum Game
-* **Monolithic Baselines:** A standalone heavy model evaluates every instance through its full tree ensemble, expending identical computational effort on trivial samples as it does on complex edge cases.
-* **XGBoost IDK Cascade:** Stage 1 resolves **over 70%** of clear, unambiguous samples using a microsecond-level shallow model. Only the most ambiguous boundary cases are escalated to Stage 2, achieving **near-heavy model accuracy at near-light model speed** with a **2.5x–4x net speedup**.
-
-#### 2. Well-Calibrated Probabilities for Reliable Deferral ($\tau$)
-* **The Problem with Deep Learning:** Neural networks and tabular deep architectures (e.g., TabNet) are notoriously overconfident and poorly calibrated, making confidence thresholding ($\tau_{\text{low}}, \tau_{\text{high}}$) erratic and unreliable.
-* **The XGBoost Advantage:** Gradient-boosted decision trees optimized via log-loss produce smoothly distributed, well-calibrated probability estimates out-of-the-box. This ensures that deferrals occur strictly on genuinely hard samples near decision boundaries.
-
-#### 3. Native CPU Efficiency (Zero GPU Memory Overhead)
-* **The Problem with DNN Cascades:** Multi-stage deep neural networks require host-to-device (CPU-to-GPU) memory transfers between stages, creating latency bottlenecks that negate Stage 1 time savings.
-* **The XGBoost Advantage:** XGBoost executes natively in optimized multi-threaded C++ on standard CPU architecture. This allows microsecond-level Stage 1 evaluations and seamless escalation to Stage 2 without hardware transfer penalties, making it ideal for cost-effective CPU production deployments.
-
-#### 4. Sharp Non-Linear Boundaries on Tabular Features
-* **The XGBoost Advantage:** Decision trees naturally construct step-wise, axis-aligned decision surfaces perfectly suited for tabular feature spaces. Stage 1 rapidly isolates rectangular regions of high-confidence predictions, isolating complex non-linear boundary zones exclusively for Stage 2.
-
----
-
-### Summary
-By combining **selective deferred prediction (IDK cascades)** with **XGBoost's native CPU speed and probability calibration**, this architecture achieves a superior Pareto frontier—maximizing throughput and minimizing latency without sacrificing model precision.
+Work in progress. Advisor feedback (Aug 2026) requested: (1) reporting total computation time alongside
+per-sample latency — added in Section 10; (2) broadening the comparison beyond a single router swap to a
+set of router families across datasets — added via `ROUTER_REGISTRY` and Logistic Regression/Decision
+Tree baselines. Next step: rerun the full notebook to get final numbers for all four router families and
+update this README's placeholders above.
