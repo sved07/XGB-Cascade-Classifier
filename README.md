@@ -101,11 +101,3 @@ Y% of router compute time, Random Forest: Z%, ...")*
    edit cell order, keep `measure_router_overhead_per_sample` (Section 4) before `evaluate_router_cascade`
    (Section 5), which depends on it.
 3. Results land in `trial_df`; the Pareto plot saves to `router_family_pareto.png`.
-
-## Status
-
-Work in progress. Advisor feedback (Aug 2026) requested: (1) reporting total computation time alongside
-per-sample latency — added in Section 10; (2) broadening the comparison beyond a single router swap to a
-set of router families across datasets — added via `ROUTER_REGISTRY` and Logistic Regression/Decision
-Tree baselines. Next step: rerun the full notebook to get final numbers for all four router families and
-update this README's placeholders above.
