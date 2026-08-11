@@ -71,10 +71,6 @@ automatically. This run adds:
 - **Decision Tree** (single tree, no ensembling) — isolates whether *ensembling itself* (bagging or
   boosting over many trees) is the source of overhead, independent of tree count.
 
-*(Fill in this section with the actual Logistic Regression / Decision Tree numbers once you've run the
-updated notebook — the registry-based structure means the Summary Performance and Pareto sections will
-report them automatically alongside XGBoost and Random Forest.)*
-
 ## Total Computation Time
 
 The notebook reports both:
