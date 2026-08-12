@@ -80,9 +80,6 @@ The notebook reports both:
    training+evaluation consumed, useful for distinguishing "cheap to run at inference time" (per-sample
    latency) from "cheap to train and evaluate at experiment time" (total compute).
 
-*(Fill in the actual numbers here after running — e.g. "Total pipeline wall-clock: X minutes; XGBoost:
-Y% of router compute time, Random Forest: Z%, ...")*
-
 ## Repository Structure
 
 - `idk_cascade_full_study.ipynb` — main notebook: dataset/model setup, router training, overhead
