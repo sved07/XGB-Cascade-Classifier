@@ -1,96 +1,132 @@
-# IDK Cascade Meta-Router Study
+# XGB-Cascade-Classifier: Quantifying Router Overhead in IDK Cascades
 
-## Overview
+Companion notebook for the work-in-progress paper *"Quantifying Router Overhead in IDK Cascade Skip
+Decisions"* (Vedula, Cheng, Carroll — University of Houston Real-Time Systems Lab).
 
-This project studies **IDK (I-Don't-Know) cascades** — a technique for making inference cheaper by
-running a small, fast model first (Model A) and only escalating to a large, accurate model (Model C)
-when Model A signals low confidence. The escalation decision is made by a small **meta-router** classifier
-trained on Model A's own output telemetry (confidence, entropy, margin between top-2 class probabilities).
+## What this is
 
-The core question this project investigates: **does the choice of meta-router matter for the cascade's
-end-to-end latency, or is the router "free" compared to the cost of the underlying models?**
+IDK (I-Don't-Know) cascades reduce average inference cost by routing an input through a fast model first
+and escalating to an expensive model only when the fast model's confidence is low. Prior work in this line
+of research ([Nguyen, Cheng, Carroll, RTSS 2024]; [Katikaneni, Cheng, Carroll, RTSS 2025]) evaluated a
+static confidence threshold and a Random Forest classifier for making that escalation decision, but neither
+measured how much the *router itself* costs to run — both treated the routing decision as effectively free
+and reported only end-to-end cascade latency.
 
-## Setup
+This notebook measures router inference overhead directly, isolates it from the cost of the models it's
+choosing between, and asks whether that overhead can be large enough to matter — across five different
+router implementations rather than one.
 
-- **Base cascade**: ResNet20 (Model A, fast/cheap) → ResNet56 (Model C, slow/accurate), pretrained on
-  CIFAR-10 and CIFAR-100 (`chenyaofo/pytorch-cifar-models`).
-- **Router features**: `confidence`, `entropy`, `margin` — all derived from Model A's softmax output on
-  each sample, no extra forward pass required.
-- **Router families compared**: XGBoost, Random Forest, Logistic Regression, and a single shallow
-  Decision Tree — all trained with the same cost-sensitive class weighting so no router is unfairly
-  tuned relative to the others.
-- **Evaluation**: 8 random seeds × 2 datasets (CIFAR-10, CIFAR-100), 4,000 samples per seed, holding a
-  fixed escalation threshold (`theta = 0.20`) and early-exit threshold (`0.90`) constant across all
-  router families for a fair comparison.
-- **Baselines**: "Pure Expert" (always run Model C, no cascade) and a "Naive Threshold" cascade
-  (escalate purely on a raw confidence cutoff, no learned router at all).
+## Architecture
 
-## Key Finding: router overhead can erase the entire benefit of cascading
+A two-stage cascade: a lightweight ResNet20 (Model A) and a high-capacity ResNet56 (Model C), evaluated on
+CIFAR-10 and CIFAR-100 using pretrained checkpoints from `chenyaofo/pytorch-cifar-models`. For every input,
+three telemetry features are extracted from Model A's output — confidence, entropy, and the margin between
+its top two predicted probabilities — and passed to a router that decides whether to accept Model A's
+answer or escalate to Model C.
 
-Early results only measured cascade latency as `LATENCY_A + LATENCY_C`, which **excluded the router's
-own inference cost** entirely. Once that overhead is correctly folded into the end-to-end latency:
+## Routers compared
 
-| Metric | XGBoost | Random Forest |
+All five are trained identically on the same three features with the same cost-sensitive weighting, so no
+router receives preferential tuning:
+
+- **XGBoost**
+- **Random Forest**
+- **Logistic Regression**
+- **Decision Tree** (single shallow tree, no ensembling)
+- **GA Heuristic** — a genetic-algorithm-optimized linear decision rule (4 scalar weights) that requires no
+  call into scikit-learn or XGBoost at inference time, included specifically to test whether library-call
+  overhead can be avoided entirely.
+
+## The corrected latency metric
+
+Prior evaluations report cascade latency as approximately:
+
+```
+Latency_naive = Latency_A + p(escalate) × Latency_C
+```
+
+which implicitly treats the router's own decision as instantaneous. This notebook instead measures each
+router's actual `predict_proba` (or direct evaluation, for the GA Heuristic) wall-clock cost and includes
+it explicitly:
+
+```
+Latency_corrected = Latency_A + Overhead_router + p(escalate) × Latency_C
+```
+
+## Key results (8 seeds × CIFAR-10 + CIFAR-100)
+
+**Router overhead alone (ms/sample):**
+
+| Router | Mean | Std |
 |---|---|---|
-| Router overhead alone | 0.465 ± 0.059 ms/sample | 3.258 ± 0.227 ms/sample |
-| End-to-end cascade latency | 4.635 ± 0.769 ms | 7.563 ± 0.866 ms |
-| Accuracy | 83.48 ± 10.76% | 83.59 ± 10.65% |
+| GA Heuristic | 0.0125 | 0.0009 |
+| Decision Tree | 0.1475 | 0.0118 |
+| Logistic Regression | 0.2017 | 0.0085 |
+| XGBoost | 0.4000 | 0.0063 |
+| Random Forest | 3.2369 | 0.0980 |
 
-For reference, the "Pure Expert" baseline (always running Model C, no cascade at all) costs **6.831 ms**.
+**Overhead-corrected cascade latency (ms):**
 
-**The Random Forest cascade (7.563 ms) ends up slower than never cascading at all.** Its own router
-overhead is large enough that the "cheap path" (Model A + router, before ever considering Model C) already
-costs nearly as much as the full expert model — so once you add the cost of the samples that *do* escalate,
-the total exceeds the no-cascade baseline. XGBoost's much smaller overhead (7x less) means its cheap path
-stays meaningfully below the expert model's cost, so the cascade's savings survive.
+| Method | Mean | Std |
+|---|---|---|
+| GA Heuristic | 3.0311 | 0.5698 |
+| Logistic Regression | 3.9458 | 0.4835 |
+| Decision Tree | 4.1654 | 0.7616 |
+| XGBoost | 4.4795 | 0.7661 |
+| Random Forest | 7.4282 | 0.8587 |
+| Pure Expert (no cascade) | 6.7495 | — |
 
-Accuracy between XGBoost and Random Forest is statistically indistinguishable (paired t-test / Wilcoxon,
-not significant) — this is a **pure latency effect**, not an accuracy/latency tradeoff. The latency gap
-itself is highly significant: **p = 0.0078** (Wilcoxon signed-rank, the smallest achievable p-value at
-n=8 seeds) on both CIFAR-10 and CIFAR-100 — Random Forest was slower than XGBoost on every single seed,
-with zero exceptions.
+**Random Forest's cascade is slower on average than never cascading at all.** This is invisible under the
+naive latency formula used in prior work — it only appears once router overhead is measured and included.
 
-## Why the overhead gap exists
+**The GA Heuristic achieves the lowest overall cascade latency of any method tested**, consistent with its
+near-zero overhead — but this is not a free win: it shows a statistically significant accuracy penalty
+(3.5–4.4 percentage points lower than every other router on CIFAR-100; a smaller but still significant gap
+against XGBoost and Random Forest on CIFAR-10). It's a genuine speed/accuracy trade-off, not a strictly
+dominant option.
 
-Profiling `predict_proba` on both router types (same hyperparameters: `n_estimators=50, max_depth=3`)
-shows the gap is **not** primarily about tree-evaluation cost. XGBoost's booster evaluates all 50 trees in
-one compiled call. Random Forest's overhead is dominated by sklearn's ensemble dispatch machinery —
-`joblib.Parallel` call overhead plus a `check_is_fitted` / `warnings.filterwarnings` check run on *every
-individual tree, every single call*. This is an implementation-level inefficiency in scikit-learn's
-`RandomForestClassifier`, not an inherent property of Random Forest as an algorithm.
+Accuracy is otherwise statistically indistinguishable between XGBoost and Random Forest on both datasets.
+Logistic Regression shows a small but significant accuracy penalty relative to the tree-based routers
+specifically on CIFAR-100, not on CIFAR-10.
 
-## Generalizing beyond XGBoost vs. Random Forest
+## Why Random Forest's overhead is so much larger
 
-The notebook extends the comparison to a full **router family registry** (`ROUTER_REGISTRY`), so any new
-router type can be added by writing one `train_*_router` function and adding it to the dict — every
-downstream step (overhead timing, multi-seed trial, pairwise significance tests, Pareto plot) picks it up
-automatically. This run adds:
+Profiling `predict_proba` under matched hyperparameters (`n_estimators=50, max_depth=3`) shows XGBoost
+evaluates all 50 trees in one compiled call, while Random Forest's overhead is dominated by scikit-learn's
+`joblib.Parallel` dispatch machinery and a per-tree `check_is_fitted` / `warnings.filterwarnings` check
+executed once for every one of the 50 trees, on every call. This points to a specific implementation detail
+in scikit-learn's `RandomForestClassifier`, not to ensembling in general — the GA Heuristic's near-zero
+overhead, achieved by skipping library calls entirely, is direct supporting evidence for this.
 
-- **Logistic Regression** — the simplest possible router, useful for checking whether router complexity
-  buys anything at all.
-- **Decision Tree** (single tree, no ensembling) — isolates whether *ensembling itself* (bagging or
-  boosting over many trees) is the source of overhead, independent of tree count.
+## Statistical validation
 
-## Total Computation Time
+All headline comparisons use paired t-tests and Wilcoxon signed-rank tests across the 8 seeds. The
+XGBoost/Random Forest latency gap is significant on both datasets (p = 0.0078, Wilcoxon — the minimum
+attainable p-value at n = 8). The near-identical accuracy between XGBoost and Random Forest was verified as
+non-coincidental: on a representative seed, the two routers agree on the escalation decision for 99.12% of
+samples, and every disagreement occurs on a sample where Model A and Model C agree on correctness anyway.
 
-The notebook reports both:
-1. **Total pipeline wall-clock time** — the full time to train and evaluate every router family, across
-   all seeds and both datasets (Section 10 of the notebook).
-2. **Per-router-family cumulative compute time** — how much of that total each router family's
-   training+evaluation consumed, useful for distinguishing "cheap to run at inference time" (per-sample
-   latency) from "cheap to train and evaluate at experiment time" (total compute).
+## Total compute cost
 
-## Repository Structure
+Full pipeline wall-clock time (training and evaluating all five routers, all seeds, both datasets):
+**694.26 seconds (11.57 minutes)**. Of the router-specific train+eval time, Random Forest accounts for
+76.9%, versus 9.8% (XGBoost), 4.8% (Logistic Regression), 4.6% (GA Heuristic), and 4.0% (Decision Tree) —
+the same implementation-level overhead affects training cost, not just inference cost.
 
-- `idk_cascade_full_study.ipynb` — main notebook: dataset/model setup, router training, overhead
-  profiling, multi-seed evaluation across all router families, significance testing, Pareto plot, and
-  total compute time reporting.
+## Repository structure
 
-## How to Run
+- `idk_cascade_full_study.ipynb` — the complete pipeline: dataset/model setup, router training (all five
+  families via a shared `ROUTER_REGISTRY`), overhead profiling, multi-seed evaluation, significance
+  testing, and total compute-time reporting.
 
-1. Open `idk_cascade_full_study.ipynb` in Colab (GPU runtime recommended — CIFAR-100 with ResNet56 across
-   8 seeds × 2 datasets × 4 router families is compute-heavy).
-2. `Runtime → Run all`. The notebook is ordered so every function is defined before it's used — if you
-   edit cell order, keep `measure_router_overhead_per_sample` (Section 4) before `evaluate_router_cascade`
-   (Section 5), which depends on it.
-3. Results land in `trial_df`; the Pareto plot saves to `router_family_pareto.png`.
+## Running it
+
+Open in Colab (GPU runtime recommended) and `Runtime → Run all`. Cell order matters:
+`measure_router_overhead_per_sample` must execute before `evaluate_router_cascade`, which depends on it —
+keep this ordering if you rearrange cells.
+
+## Status
+
+Work in progress. Current limitations, addressed as future work: the cascade studied here is two-stage
+(A → C); extending to the three-stage A → B → C architecture used in prior work, and validating results on
+embedded hardware (e.g., an NVIDIA Jetson Nano, matching Katikaneni et al.), are the next steps.
