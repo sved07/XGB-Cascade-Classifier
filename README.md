@@ -10,9 +10,9 @@ IDK cascades defer ambiguous samples from an efficient base model to a larger ex
 
 ### 1. Model Hierarchy
 The cascade leverages three ResNet variants pre-trained on CIFAR-10 and CIFAR-100 (via `chenyaofo/pytorch-cifar-models`):
-* **Model A (Fast):** ResNet-20 ($15.12 \pm 1.94$ ms)
-* **Model B (Intermediate):** ResNet-32 ($23.60 \pm 4.05$ ms)
-* **Model C (Expert):** ResNet-56 ($39.35 \pm 2.67$ ms)
+- **Model A (Fast):** ResNet-20 ($15.12 \pm 1.94$ ms)
+- **Model B (Intermediate):** ResNet-32 ($23.60 \pm 4.05$ ms)
+- **Model C (Expert):** ResNet-56 ($39.35 \pm 2.67$ ms)
 
 ### 2. Telemetry Feature Extraction
 Routers make escalation decisions using 3 lightweight telemetry features computed directly from the model output probabilities:
@@ -24,15 +24,15 @@ An **Early Exit Threshold** ($\tau_{\text{early}} = 0.90$) allows highly confide
 
 ### 3. Evaluated Router Families
 Five router algorithms were trained using cost-sensitive positive class weights scaled by the latency penalty of escalating to downstream models:
-* **XGBoost (XGB):** Gradient boosted decision trees ($n_{\text{estimators}}=50$, $\text{max\_depth}=3$).
-* **Random Forest (RF):** Ensemble of bagged trees ($n_{\text{estimators}}=50$, $\text{max\_depth}=3$).
-* **Logistic Regression (LogReg):** Linear classification model.
-* **Decision Tree (DTree):** Single decision tree ($\text{max\_depth}=3$).
-* **Genetic Algorithm (GA) Heuristic:** 4-parameter linear threshold router optimized via genetic search over 25 restarts.
+- **XGBoost (XGB):** Gradient boosted decision trees (`n_estimators=50`, `max_depth=3`).
+- **Random Forest (RF):** Ensemble of bagged trees (`n_estimators=50`, `max_depth=3`).
+- **Logistic Regression (LogReg):** Linear classification model.
+- **Decision Tree (DTree):** Single decision tree (`max_depth=3`).
+- **Genetic Algorithm (GA) Heuristic:** 4-parameter linear threshold router optimized via genetic search over 25 restarts.
 
 ### 4. Cascade Topologies
-* **Two-Tier ($A \to C$):** Model A infers first; if confidence $< 0.90$, the router decides whether to escalate directly to Model C.
-* **Three-Tier ($A \to B \to C$):** Sub-router $R_{AB}$ determines whether to escalate from Model A to Model B. If escalated, sub-router $R_{BC}$ decides whether further escalation to Model C is necessary.
+- **Two-Tier ($A \to C$):** Model A infers first; if confidence $< 0.90$, the router decides whether to escalate directly to Model C.
+- **Three-Tier ($A \to B \to C$):** Sub-router $R_{AB}$ determines whether to escalate from Model A to Model B. If escalated, sub-router $R_{BC}$ decides whether further escalation to Model C is necessary.
 
 ---
 
