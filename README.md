@@ -2,7 +2,7 @@
 
 This repository contains the complete experimental workflow, training notebooks, and hardware profiling scripts for benchmarking **"I Don't Know" (IDK) cascade architectures** on resource-constrained embedded edge hardware (NVIDIA Jetson Nano).
 
-IDK cascades defer ambiguous samples from an efficient base model to larger expert models to balance accuracy, average latency, and worst-case execution time (WCET) : 6, 7]. While traditional cascade research frequently treats the routing step as zero-cost, this benchmark measures **per-sample router execution overhead** directly on-device across **2-stage**, **3-stage**, and **4-stage** cascade topologies across five distinct router families.
+IDK cascades defer ambiguous samples from an efficient base model to larger expert models to balance accuracy, average latency, and worst-case execution time (WCET). While traditional cascade research frequently treats the routing step as zero-cost, this benchmark measures **per-sample router execution overhead** directly on-device across **2-stage**, **3-stage**, and **4-stage** cascade topologies across five distinct router families.
 
 ---
 
